@@ -56,17 +56,34 @@ use rkyv::{
 #[cfg(feature = "alloc")]
 pub use self::interner::*;
 
+/// The result of starting to serialize a shared pointer.
+pub enum InterningState<S> {
+    /// The caller started sharing this value. They should proceed to serialize
+    /// the shared value and call `finish_sharing`.
+    Started(S),
+    /// Another caller started sharing this value, but has not finished yet.
+    /// This can only occur with cyclic shared pointer structures, and so rkyv
+    /// treats this as an error by default.
+    Pending,
+    /// This value has already been shared. The caller should use the returned
+    /// address to share its value.
+    Finished(usize),
+}
+
 /// A shared value interning strategy.
 ///
 /// This trait is required to use [`Intern`] and [`DerefIntern`].
 pub trait Interning<T: ?Sized, E = <Self as Fallible>::Error> {
+    /// Internal interning state.
+    type State<'a> where T: 'a;
+
     /// Starts interning the given value.
-    fn start_interning(&mut self, value: &T) -> SharingState;
+    fn start_interning<'a>(&mut self, value: &'a T) -> InterningState<Self::State<'a>>;
 
     /// Finishes interning the given value.
     ///
     /// Returns an error if the value was not pending.
-    fn finish_interning(&mut self, value: &T, pos: usize) -> Result<(), E>;
+    fn finish_interning(&mut self, state: Self::State<'_>, pos: usize) -> Result<(), E>;
 }
 
 #[derive(Debug)]
@@ -95,13 +112,13 @@ pub trait InterningExt<T: ?Sized, E>: Interning<T, E> {
         T: SerializeUnsized<Self>,
     {
         match self.start_interning(value) {
-            SharingState::Started => {
+            InterningState::Started(state) => {
                 let pos = value.serialize_unsized(self)?;
-                self.finish_interning(value, pos)?;
+                self.finish_interning(state, pos)?;
                 Ok(pos)
             }
-            SharingState::Pending => fail!(CyclicInternedValueError),
-            SharingState::Finished(pos) => Ok(pos),
+            InterningState::Pending => fail!(CyclicInternedValueError),
+            InterningState::Finished(pos) => Ok(pos),
         }
     }
 }
@@ -428,12 +445,14 @@ where
     I: Interning<T, E>,
     T: ?Sized,
 {
-    fn start_interning(&mut self, value: &T) -> SharingState {
+    type State<'a> = I::State<'a> where T: 'a;
+
+    fn start_interning<'a>(&mut self, value: &'a T) -> InterningState<Self::State<'a>> {
         self.interning.start_interning(value)
     }
 
-    fn finish_interning(&mut self, value: &T, pos: usize) -> Result<(), E> {
-        self.interning.finish_interning(value, pos)
+    fn finish_interning(&mut self, state: Self::State<'_>, pos: usize) -> Result<(), E> {
+        self.interning.finish_interning(state, pos)
     }
 }
 
@@ -442,12 +461,14 @@ where
     S: Interning<T, E> + ?Sized,
     T: ?Sized,
 {
-    fn start_interning(&mut self, value: &T) -> SharingState {
+    type State<'a> = S::State<'a> where T: 'a;
+
+    fn start_interning<'a>(&mut self, value: &'a T) -> InterningState<Self::State<'a>> {
         S::start_interning(self, value)
     }
 
-    fn finish_interning(&mut self, value: &T, pos: usize) -> Result<(), E> {
-        S::finish_interning(self, value, pos)
+    fn finish_interning(&mut self, state: Self::State<'_>, pos: usize) -> Result<(), E> {
+        S::finish_interning(self, state, pos)
     }
 }
 

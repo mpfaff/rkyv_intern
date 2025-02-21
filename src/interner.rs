@@ -1,17 +1,14 @@
 use alloc::borrow::ToOwned;
-use core::{borrow::Borrow, error::Error, fmt, hash::Hash};
+use core::{borrow::Borrow, error::Error, fmt, hash::{BuildHasher, Hash}, num::NonZeroUsize};
 
 use hashbrown::HashMap;
-use rkyv::{
-    rancor::{fail, Source},
-    ser::sharing::SharingState,
-};
+use rkyv::rancor::{fail, Source};
 
-use crate::Interning;
+use crate::{Interning, InterningState};
 
 /// A general-purpose value interner.
 pub struct Interner<T> {
-    value_to_pos: HashMap<T, Option<usize>>,
+    value_to_pos: HashMap<T, Option<NonZeroUsize>>,
 }
 
 impl<T> Interner<T> {
@@ -20,6 +17,16 @@ impl<T> Interner<T> {
         Self {
             value_to_pos: HashMap::new(),
         }
+    }
+
+    /// The number of interned values.
+    pub fn len(&self) -> usize {
+        self.value_to_pos.len()
+    }
+
+    /// The interned values.
+    pub fn values(&self) -> impl Iterator<Item = &T> + ExactSizeIterator {
+        self.value_to_pos.keys()
     }
 }
 
@@ -57,25 +64,35 @@ where
     T: Hash + Eq + ToOwned + ?Sized,
     E: Source,
 {
-    fn start_interning(&mut self, value: &T) -> SharingState {
-        match self.value_to_pos.get(value) {
-            None => {
-                self.value_to_pos.insert(value.to_owned(), None);
-                SharingState::Started
+    type State<'a> = (&'a T, u64) where T: 'a;
+
+    fn start_interning<'a>(&mut self, value: &'a T) -> InterningState<Self::State<'a>> {
+        use hashbrown::hash_map::RawEntryMut::*;
+        let hash = self.value_to_pos.hasher().hash_one(value);
+        match self.value_to_pos.raw_entry_mut().from_key_hashed_nocheck(hash, value) {
+            Occupied(entry) => match entry.get() {
+                None => InterningState::Pending,
+                Some(pos) => InterningState::Finished(pos.get() - 1),
+            },
+            Vacant(entry) => {
+                entry.insert(value.to_owned(), None);
+                InterningState::Started((value, hash))
             }
-            Some(None) => SharingState::Pending,
-            Some(Some(pos)) => SharingState::Finished(*pos),
         }
     }
 
-    fn finish_interning(&mut self, value: &T, pos: usize) -> Result<(), E> {
-        match self.value_to_pos.get_mut(value) {
-            None => fail!(NotStarted),
-            Some(Some(_)) => fail!(AlreadyFinished),
-            Some(x) => {
-                *x = Some(pos);
-                Ok(())
+    fn finish_interning(&mut self, state: Self::State<'_>, pos: usize) -> Result<(), E> {
+        use hashbrown::hash_map::RawEntryMut::*;
+        let (value, hash) = state;
+        match self.value_to_pos.raw_entry_mut().from_key_hashed_nocheck(hash, value) {
+            Occupied(entry) => match entry.into_mut() {
+                Some(_) => fail!(AlreadyFinished),
+                x => {
+                    *x = Some(NonZeroUsize::new(pos + 1).unwrap());
+                    Ok(())
+                }
             }
+            Vacant(_) => fail!(NotStarted),
         }
     }
 }
