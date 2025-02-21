@@ -6,9 +6,17 @@ use rkyv::rancor::{fail, Source};
 
 use crate::{Interning, InterningState};
 
+/// An entry in the interner.
+pub struct Entry {
+    pos: Option<NonZeroUsize>,
+    /// The number of references to the value.
+    #[cfg(feature = "statistics")]
+    pub ref_cnt: NonZeroUsize,
+}
+
 /// A general-purpose value interner.
 pub struct Interner<T> {
-    value_to_pos: HashMap<T, Option<NonZeroUsize>>,
+    value_to_pos: HashMap<T, Entry>,
 }
 
 impl<T> Interner<T> {
@@ -25,8 +33,8 @@ impl<T> Interner<T> {
     }
 
     /// The interned values.
-    pub fn values(&self) -> impl Iterator<Item = &T> + ExactSizeIterator {
-        self.value_to_pos.keys()
+    pub fn iter(&self) -> hashbrown::hash_map::Iter<'_, T, Entry> {
+        self.value_to_pos.iter()
     }
 }
 
@@ -70,12 +78,23 @@ where
         use hashbrown::hash_map::RawEntryMut::*;
         let hash = self.value_to_pos.hasher().hash_one(value);
         match self.value_to_pos.raw_entry_mut().from_key_hashed_nocheck(hash, value) {
-            Occupied(entry) => match entry.get() {
-                None => InterningState::Pending,
-                Some(pos) => InterningState::Finished(pos.get() - 1),
+            Occupied(mut entry) => {
+                let entry = entry.get_mut();
+                #[cfg(feature = "statistics")]
+                {
+                    entry.ref_cnt = entry.ref_cnt.checked_add(1).unwrap();
+                }
+                match entry.pos {
+                    None => InterningState::Pending,
+                    Some(pos) => InterningState::Finished(pos.get() - 1),
+                }
             },
             Vacant(entry) => {
-                entry.insert(value.to_owned(), None);
+                entry.insert(value.to_owned(), Entry {
+                    pos: None,
+                    #[cfg(feature = "statistics")]
+                    ref_cnt: NonZeroUsize::new(1).unwrap(),
+                });
                 InterningState::Started((value, hash))
             }
         }
@@ -85,7 +104,7 @@ where
         use hashbrown::hash_map::RawEntryMut::*;
         let (value, hash) = state;
         match self.value_to_pos.raw_entry_mut().from_key_hashed_nocheck(hash, value) {
-            Occupied(entry) => match entry.into_mut() {
+            Occupied(entry) => match &mut entry.into_mut().pos {
                 Some(_) => fail!(AlreadyFinished),
                 x => {
                     *x = Some(NonZeroUsize::new(pos + 1).unwrap());

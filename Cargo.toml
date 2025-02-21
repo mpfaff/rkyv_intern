@@ -3,8 +3,6 @@ name = "rkyv_intern"
 version = "0.1.0"
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 hashbrown = { version = "0.15", optional = true }
 rkyv = { version = "0.8", default-features = false }
@@ -12,6 +10,7 @@ rkyv = { version = "0.8", default-features = false }
 [features]
 default = ["alloc"]
 alloc = ["hashbrown", "rkyv/alloc"]
+statistics = []
 
 [patch.crates-io]
 rkyv = { git = "https://github.com/rkyv/rkyv" }
